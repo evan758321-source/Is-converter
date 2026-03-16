@@ -8,6 +8,10 @@ import re
 import base64
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
+import imageio_ffmpeg
+
+# Point yt-dlp at the bundled ffmpeg binary (no system ffmpeg needed)
+FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 DISCORD_TOKEN   = os.environ["DISCORD_TOKEN"]
@@ -61,6 +65,7 @@ def download_wav(url: str, out_dir: str, cookies_path: str | None) -> tuple[str,
             "key": "FFmpegExtractAudio",
             "preferredcodec": "wav",
         }],
+        "ffmpeg_location": FFMPEG_PATH,
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
