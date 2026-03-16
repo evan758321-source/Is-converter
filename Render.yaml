@@ -2,10 +2,7 @@ services:
   - type: web                   # "web" so Render assigns a public URL (needed for keep-alive pings)
     name: yt2wav-discord-bot
     runtime: python
-    buildCommand: |
-      pip install --upgrade pip
-      pip install -r requirements.txt
-      apt-get update -y && apt-get install -y ffmpeg
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: python bot.py
     envVars:
       - key: DISCORD_TOKEN
