@@ -70,31 +70,34 @@ def sanitize_filename(name):
 
 def download_wav(url, out_dir, cookies_path):
     ydl_opts = {
-    "format": "bestaudio*/best",
-    "outtmpl": os.path.join(out_dir, "%(title)s.%(ext)s"),
-    "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "wav"}],
-    "ffmpeg_location": FFMPEG_PATH,
-    "quiet": True,
-    "no_warnings": True,
-    "noplaylist": True,
-}
-        },
+        "format": "bestaudio*/best",
+        "outtmpl": os.path.join(out_dir, "%(title)s.%(ext)s"),
+        "postprocessors": [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "wav"
+        }],
+        "ffmpeg_location": FFMPEG_PATH,
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
     }
+
     if cookies_path:
         ydl_opts["cookiefile"] = cookies_path
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info  = ydl.extract_info(url, download=True)
+        info = ydl.extract_info(url, download=True)
         title = info.get("title", "audio")
-        safe  = sanitize_filename(title)
+        safe = sanitize_filename(title)
         fpath = os.path.join(out_dir, safe + ".wav")
+
         if not os.path.isfile(fpath):
             for f in os.listdir(out_dir):
                 if f.endswith(".wav"):
                     fpath = os.path.join(out_dir, f)
                     break
-    return fpath, title
 
+    return fpath, title
 
 def generate_go_downloader(url, title):
     safe = sanitize_filename(title).replace('"', '\\"')
