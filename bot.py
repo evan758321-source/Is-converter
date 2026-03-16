@@ -70,7 +70,7 @@ def sanitize_filename(name):
 
 def download_wav(url, out_dir, cookies_path):
     ydl_opts = {
-    "format": "ba/b",
+    "format": "bestaudio*/best",
     "outtmpl": os.path.join(out_dir, "%(title)s.%(ext)s"),
     "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "wav"}],
     "ffmpeg_location": FFMPEG_PATH,
