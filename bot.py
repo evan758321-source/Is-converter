@@ -80,14 +80,16 @@ def sanitize_filename(name):
 
 
 def download_wav(url, out_dir, cookies_path):
+    mp3_path = os.path.join(out_dir, "audio.mp3")
+
     ydl_opts = {
-        "format": "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best",
-        "outtmpl": os.path.join(out_dir, "%(title)s.%(ext)s"),
-        "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "wav"}],
+        "format": "bestaudio/best",
+        "outtmpl": os.path.join(out_dir, "audio.%(ext)s"),
+        "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}],
         "ffmpeg_location": FFMPEG_PATH,
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "web"],
+                "player_client": ["ios", "tv_embedded"],
             }
         },
         "quiet": True,
@@ -100,14 +102,17 @@ def download_wav(url, out_dir, cookies_path):
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info  = ydl.extract_info(url, download=True)
         title = info.get("title", "audio")
-        safe  = sanitize_filename(title)
-        fpath = os.path.join(out_dir, safe + ".wav")
-        if not os.path.isfile(fpath):
-            for f in os.listdir(out_dir):
-                if f.endswith(".wav"):
-                    fpath = os.path.join(out_dir, f)
-                    break
-    return fpath, title
+
+    # Convert MP3 -> WAV with FFmpeg
+    wav_path = os.path.join(out_dir, "audio.wav")
+    subprocess.run(
+        [FFMPEG_PATH, "-i", mp3_path, wav_path],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    return wav_path, title
 
 
 def generate_go_downloader(url, title):
