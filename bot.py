@@ -70,13 +70,17 @@ def sanitize_filename(name):
 
 def download_wav(url, out_dir, cookies_path):
     ydl_opts = {
-        "format": "bestaudio/best",
+        # "ba/b" is the modern short form: bestaudio with best fallback
+        # extractor_args allows formats even when YouTube's PO token is missing
+        # (common cause of "format not available" on server environments)
+        "format": "ba/b",
         "outtmpl": os.path.join(out_dir, "%(title)s.%(ext)s"),
         "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "wav"}],
         "ffmpeg_location": FFMPEG_PATH,
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
+        "extractor_args": {"youtube": {"formats": ["missing_pot"]}},
     }
     if cookies_path:
         ydl_opts["cookiefile"] = cookies_path
