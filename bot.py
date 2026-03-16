@@ -1,3 +1,16 @@
+import subprocess
+import sys
+
+def update_yt_dlp():
+    print("Updating yt-dlp...")
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-U", "yt-dlp", "--quiet"],
+        check=True
+    )
+    print("yt-dlp updated.")
+
+update_yt_dlp()
+
 import discord
 from discord import app_commands
 import yt_dlp
@@ -18,9 +31,7 @@ MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
-# Keep-alive HTTP server (for Replit / uptime pingers)
-# Keep your pinger interval at 5 minutes or longer to avoid rapid restarts
-# which re-trigger on_ready → tree.sync() and cause Cloudflare rate limits.
+# Keep-alive HTTP server (for Railway / uptime pingers)
 # ---------------------------------------------------------------------------
 
 class PingHandler(BaseHTTPRequestHandler):
@@ -70,10 +81,15 @@ def sanitize_filename(name):
 
 def download_wav(url, out_dir, cookies_path):
     ydl_opts = {
-        "format": "bestaudio/best",
+        "format": "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best",
         "outtmpl": os.path.join(out_dir, "%(title)s.%(ext)s"),
         "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "wav"}],
         "ffmpeg_location": FFMPEG_PATH,
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "web"],
+            }
+        },
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
@@ -92,6 +108,7 @@ def download_wav(url, out_dir, cookies_path):
                     fpath = os.path.join(out_dir, f)
                     break
     return fpath, title
+
 
 def generate_go_downloader(url, title):
     safe = sanitize_filename(title).replace('"', '\\"')
@@ -171,12 +188,7 @@ async def yt2wav(interaction: discord.Interaction, url: str):
 
 
 # ---------------------------------------------------------------------------
-# on_ready — sync slash commands only once per process lifetime.
-#
-# FIX: on_ready fires every time the bot reconnects (network blips, rolling
-# restarts, etc.).  Calling tree.sync() on every fire rapidly exhausts the
-# Discord/Cloudflare rate limit for the global command-sync endpoint.
-# The _synced flag ensures we only sync a single time.
+# on_ready
 # ---------------------------------------------------------------------------
 
 @client.event
