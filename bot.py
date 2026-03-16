@@ -70,21 +70,14 @@ def sanitize_filename(name):
 
 def download_wav(url, out_dir, cookies_path):
     ydl_opts = {
-        # Force the android player client - bypasses YouTube SABR streaming
-        # enforcement on server IPs. The web/tv clients only get SABR (a
-        # proprietary protocol yt-dlp cannot decode) on headless servers,
-        # but the android client still returns standard https/dash formats.
-        "format": "bestaudio/best",
-        "outtmpl": os.path.join(out_dir, "%(title)s.%(ext)s"),
-        "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "wav"}],
-        "ffmpeg_location": FFMPEG_PATH,
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["android"],
-            }
+    "format": "ba/b",
+    "outtmpl": os.path.join(out_dir, "%(title)s.%(ext)s"),
+    "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "wav"}],
+    "ffmpeg_location": FFMPEG_PATH,
+    "quiet": True,
+    "no_warnings": True,
+    "noplaylist": True,
+}
         },
     }
     if cookies_path:
