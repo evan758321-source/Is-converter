@@ -16,24 +16,39 @@ DISCORD_TOKEN    = os.environ["DISCORD_TOKEN"]
 COOKIES_B64      = os.environ.get("YOUTUBE_COOKIES_B64", "")
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 
+
+# ---------------------------------------------------------------------------
+# Keep-alive HTTP server (for Replit / uptime pingers)
+# Keep your pinger interval at 5 minutes or longer to avoid rapid restarts
+# which re-trigger on_ready → tree.sync() and cause Cloudflare rate limits.
+# ---------------------------------------------------------------------------
+
 class PingHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
         self.end_headers()
         self.wfile.write(b"Bot is alive!")
+
     def do_HEAD(self):
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
         self.end_headers()
+
     def log_message(self, *_):
         pass
+
 
 def run_keepalive():
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(("0.0.0.0", port), PingHandler)
     print(f"Keep-alive HTTP server listening on port {port}")
     server.serve_forever()
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def write_cookies_file(tmp_dir):
     if not COOKIES_B64:
@@ -48,8 +63,10 @@ def write_cookies_file(tmp_dir):
         print(f"[warn] Could not write cookies file: {e}")
         return None
 
+
 def sanitize_filename(name):
     return re.sub(r'[\\/*?:"<>|]', "_", name)
+
 
 def download_wav(url, out_dir, cookies_path):
     ydl_opts = {
@@ -63,6 +80,7 @@ def download_wav(url, out_dir, cookies_path):
     }
     if cookies_path:
         ydl_opts["cookiefile"] = cookies_path
+
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info  = ydl.extract_info(url, download=True)
         title = info.get("title", "audio")
@@ -74,6 +92,7 @@ def download_wav(url, out_dir, cookies_path):
                     fpath = os.path.join(out_dir, f)
                     break
     return fpath, title
+
 
 def generate_go_downloader(url, title):
     safe = sanitize_filename(title).replace('"', '\\"')
@@ -101,30 +120,42 @@ func main() {{
 }}
 '''
 
+
+# ---------------------------------------------------------------------------
+# Bot setup
+# ---------------------------------------------------------------------------
+
 intents = discord.Intents.default()
 client  = discord.Client(intents=intents)
 tree    = app_commands.CommandTree(client)
+
 
 @tree.command(name="yt2wav", description="Convert a YouTube video to a WAV file")
 @app_commands.describe(url="The YouTube URL to convert")
 async def yt2wav(interaction: discord.Interaction, url: str):
     await interaction.response.defer(thinking=True)
+
     with tempfile.TemporaryDirectory() as tmp_dir:
         cookies_path = write_cookies_file(tmp_dir)
         try:
-            loop = asyncio.get_event_loop()
-            fpath, title = await loop.run_in_executor(None, download_wav, url, tmp_dir, cookies_path)
+            loop  = asyncio.get_event_loop()
+            fpath, title = await loop.run_in_executor(
+                None, download_wav, url, tmp_dir, cookies_path
+            )
         except Exception as e:
             await interaction.followup.send(f"❌ **Download failed.**\n```{e}```")
             return
+
         if not os.path.isfile(fpath):
             await interaction.followup.send("❌ WAV file not found after conversion.")
             return
+
         size = os.path.getsize(fpath)
+
         if size <= MAX_UPLOAD_BYTES:
             await interaction.followup.send(
                 f"✅ **{title}**",
-                file=discord.File(fpath, filename=sanitize_filename(title) + ".wav")
+                file=discord.File(fpath, filename=sanitize_filename(title) + ".wav"),
             )
         else:
             size_mb = size / (1024 * 1024)
@@ -136,13 +167,35 @@ async def yt2wav(interaction: discord.Interaction, url: str):
             await interaction.followup.send(
                 f"⚠️ **{title}** is {size_mb:.1f} MB — too large for Discord.\n"
                 f"Run this Go file locally:\n```go run {go_name}```",
-                file=discord.File(go_path, filename=go_name)
+                file=discord.File(go_path, filename=go_name),
             )
+
+
+# ---------------------------------------------------------------------------
+# on_ready — sync slash commands only once per process lifetime.
+#
+# FIX: on_ready fires every time the bot reconnects (network blips, rolling
+# restarts, etc.).  Calling tree.sync() on every fire rapidly exhausts the
+# Discord/Cloudflare rate limit for the global command-sync endpoint.
+# The _synced flag ensures we only sync a single time.
+# ---------------------------------------------------------------------------
 
 @client.event
 async def on_ready():
-    await tree.sync()
-    print(f"✅ Logged in as {client.user} — slash commands synced.")
+    if not getattr(client, "_synced", False):
+        try:
+            synced = await tree.sync()
+            print(f"✅ Synced {len(synced)} slash command(s).")
+        except discord.HTTPException as e:
+            print(f"[warn] Command sync failed: {e}")
+        client._synced = True
+
+    print(f"✅ Logged in as {client.user}")
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     t = threading.Thread(target=run_keepalive, daemon=True)
