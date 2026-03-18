@@ -2,7 +2,7 @@ import subprocess
 import sys
 
 def update_yt_dlp():
-    print("Updating yt-dlp to nightly...")
+    print("Updating yt-dlp to latest nightly...")
     subprocess.run(
         [sys.executable, "-m", "pip", "install", "-U", "--pre", "yt-dlp", "--quiet"],
         check=True
@@ -81,27 +81,17 @@ def sanitize_filename(name):
 
 def download_wav(url, out_dir, cookies_path):
     mp3_path = os.path.join(out_dir, "audio.mp3")
-
     ydl_opts = {
-        # ----------------------------------------------------------------
-        # FIX 1: YouTube SABR bypass
-        #
-        # YouTube now forces SABR streaming on "web", "ios", and
-        # "tv_embedded" clients — those clients return zero usable
-        # format URLs on server IPs.  The "android" and "mweb" clients
-        # still return direct HTTPS audio streams.
-        #
-        # "formats": "missing_pot" tells yt-dlp to include any format
-        # that is missing a PO token instead of silently dropping it,
-        # giving us the widest possible fallback net.
-        # ----------------------------------------------------------------
         "format": "bestaudio/best",
         "outtmpl": os.path.join(out_dir, "audio.%(ext)s"),
         "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}],
         "ffmpeg_location": FFMPEG_PATH,
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "mweb"],
+                # ← THIS IS THE 2026 FIX
+                # default + android + the two clients that were just patched
+                # + missing_pot to stop SABR from killing everything on servers
+                "player_client": ["default", "android", "web_embedded", "mweb"],
                 "formats": "missing_pot",
             }
         },
@@ -113,10 +103,10 @@ def download_wav(url, out_dir, cookies_path):
         ydl_opts["cookiefile"] = cookies_path
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info  = ydl.extract_info(url, download=True)
+        info = ydl.extract_info(url, download=True)
         title = info.get("title", "audio")
 
-    # Convert MP3 -> WAV with FFmpeg
+    # Convert MP3 → WAV (unchanged)
     wav_path = os.path.join(out_dir, "audio.wav")
     subprocess.run(
         [FFMPEG_PATH, "-i", mp3_path, wav_path],
@@ -124,7 +114,6 @@ def download_wav(url, out_dir, cookies_path):
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-
     return wav_path, title
 
 
