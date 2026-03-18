@@ -83,19 +83,19 @@ def download_wav(url, out_dir, cookies_path):
     mp3_path = os.path.join(out_dir, "audio.mp3")
 
     ydl_opts = {
-        "format": "bestaudio/best",
-        "outtmpl": os.path.join(out_dir, "audio.%(ext)s"),
-        "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}],
-        "ffmpeg_location": FFMPEG_PATH,
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["ios", "tv_embedded"],
-            }
-        },
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-    }
+    "format": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
+    "outtmpl": os.path.join(out_dir, "audio.%(ext)s"),
+    "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}],
+    "ffmpeg_location": FFMPEG_PATH,
+    "extractor_args": {
+        "youtube": {
+            "player_client": ["android", "web"],
+        }
+    },
+    "quiet": True,
+    "no_warnings": True,
+    "noplaylist": True,
+}
     if cookies_path:
         ydl_opts["cookiefile"] = cookies_path
 
