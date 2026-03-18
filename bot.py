@@ -4,7 +4,6 @@ import os
 import asyncio
 import tempfile
 import re
-import base64
 import threading
 import subprocess
 import requests
@@ -13,13 +12,13 @@ import imageio_ffmpeg
 
 FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
 
-DISCORD_TOKEN    = os.environ["DISCORD_TOKEN"]
+DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
+RAPIDAPI_KEY  = os.environ["RAPIDAPI_KEY"]
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 
-COBALT_API = os.environ.get("COBALT_API", "https://cobalt-production-cf4e.up.railway.app")
 
 # ---------------------------------------------------------------------------
-# Keep-alive HTTP server (for Render / uptime pingers)
+# Keep-alive HTTP server
 # ---------------------------------------------------------------------------
 
 class PingHandler(BaseHTTPRequestHandler):
@@ -53,56 +52,66 @@ def sanitize_filename(name):
     return re.sub(r'[\\/*?:"<>|]', "_", name)
 
 
+def extract_video_id(url):
+    """Extract YouTube video ID from various URL formats."""
+    patterns = [
+        r"(?:v=|\/)([0-9A-Za-z_-]{11}).*",
+        r"(?:youtu\.be\/)([0-9A-Za-z_-]{11})",
+        r"(?:embed\/)([0-9A-Za-z_-]{11})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    raise ValueError(f"Could not extract video ID from URL: {url}")
+
+
 def download_wav(url, out_dir):
-    """
-    Downloads audio via Cobalt v10 API, saves as MP3, converts to WAV.
-    Returns (wav_path, title).
-    """
+    video_id = extract_video_id(url)
 
-    # --- Step 1: Ask Cobalt for a download link ---
-    try:
-        resp = requests.post(
-            COBALT_API,
-            json={
-                "url": url,
-                "downloadMode": "audio",
-                "audioFormat": "mp3",
-                "audioBitrate": "256",
-            },
-            headers={
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-            },
-            timeout=30,
-        )
-        print(f"Cobalt response: {resp.status_code} {resp.text}")
-        resp.raise_for_status()
-        data = resp.json()
-    except requests.RequestException as e:
-        raise RuntimeError(f"Cobalt API request failed: {e}")
+    # --- Step 1: Request MP3 conversion from RapidAPI ---
+    response = requests.get(
+        "https://youtube-mp36.p.rapidapi.com/dl",
+        headers={
+            "X-RapidAPI-Key": RAPIDAPI_KEY,
+            "X-RapidAPI-Host": "youtube-mp36.p.rapidapi.com",
+        },
+        params={"id": video_id},
+        timeout=60,
+    )
+    response.raise_for_status()
+    data = response.json()
 
-    status = data.get("status")
+    if data.get("status") != "ok":
+        # Sometimes it needs a moment to process, retry up to 5 times
+        import time
+        for _ in range(5):
+            time.sleep(3)
+            response = requests.get(
+                "https://youtube-mp36.p.rapidapi.com/dl",
+                headers={
+                    "X-RapidAPI-Key": RAPIDAPI_KEY,
+                    "X-RapidAPI-Host": "youtube-mp36.p.rapidapi.com",
+                },
+                params={"id": video_id},
+                timeout=60,
+            )
+            response.raise_for_status()
+            data = response.json()
+            if data.get("status") == "ok":
+                break
+        else:
+            raise RuntimeError(f"RapidAPI conversion failed: {data}")
 
-    if status == "error":
-        raise RuntimeError(f"Cobalt error: {data.get('error', {}).get('code', 'unknown')} — {data}")
+    mp3_url = data.get("link")
+    title   = data.get("title", "audio")
 
-    if status not in ("tunnel", "redirect"):
-        raise RuntimeError(f"Unexpected Cobalt response: {data}")
+    if not mp3_url:
+        raise RuntimeError(f"No download link returned: {data}")
 
-    audio_url = data.get("url")
-    if not audio_url:
-        raise RuntimeError(f"Cobalt returned no URL: {data}")
-
-    # Try to pull a filename/title from Cobalt's response
-    filename_hint = data.get("filename", "audio")
-    title = re.sub(r'\.[^.]+$', '', filename_hint)  # strip extension
-
-    # --- Step 2: Download the audio stream ---
-    try:
-        audio_resp = requests.get(audio_url, timeout=120, stream=True)
-        audio_resp.raise_for_status()
-    except requests.RequestException as e:
-        raise RuntimeError(f"Failed to download audio from Cobalt tunnel: {e}")
+    # --- Step 2: Download the MP3 ---
+    audio_resp = requests.get(mp3_url, timeout=120, stream=True)
+    audio_resp.raise_for_status()
 
     mp3_path = os.path.join(out_dir, "audio.mp3")
     with open(mp3_path, "wb") as f:
@@ -123,40 +132,6 @@ def download_wav(url, out_dir):
         raise RuntimeError(f"FFmpeg conversion failed:\n{result.stderr.decode()}")
 
     return wav_path, title
-
-
-def generate_go_downloader(url, title):
-    safe = sanitize_filename(title).replace('"', '\\"')
-    return f'''package main
-
-import (
-\t"fmt"
-\t"io"
-\t"net/http"
-\t"os"
-)
-
-func main() {{
-\turl := "{url}"
-\tout := "{safe}.wav"
-
-\t// Download via Cobalt v10
-\tclient := &http.Client{{}}
-\treq, _ := http.NewRequest("POST", "https://api.cobalt.tools/", nil)
-\treq.Header.Set("Content-Type", "application/json")
-\treq.Header.Set("Accept", "application/json")
-\tbody := `{{"url":"` + url + `","downloadMode":"audio","audioFormat":"mp3"}}`
-\treq.Body = io.NopCloser(strings.NewReader(body))
-
-\tresp, err := client.Do(req)
-\tif err != nil {{
-\t\tfmt.Fprintln(os.Stderr, "Error:", err)
-\t\tos.Exit(1)
-\t}}
-\tdefer resp.Body.Close()
-\tfmt.Println("Saved to:", out)
-}}
-'''
 
 
 # ---------------------------------------------------------------------------
@@ -196,15 +171,9 @@ async def yt2wav(interaction: discord.Interaction, url: str):
             )
         else:
             size_mb = size / (1024 * 1024)
-            go_code = generate_go_downloader(url, title)
-            go_name = sanitize_filename(title) + "_downloader.go"
-            go_path = os.path.join(tmp_dir, go_name)
-            with open(go_path, "w", encoding="utf-8") as f:
-                f.write(go_code)
             await interaction.followup.send(
                 f"⚠️ **{title}** is {size_mb:.1f} MB — too large for Discord.\n"
-                f"Run this Go file locally:\n```go run {go_name}```",
-                file=discord.File(go_path, filename=go_name),
+                f"Use yt-dlp locally:\n```yt-dlp -x --audio-format wav '{url}'```"
             )
 
 
