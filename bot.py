@@ -171,10 +171,22 @@ async def yt2wav(interaction: discord.Interaction, url: str):
             )
         else:
             size_mb = size / (1024 * 1024)
-            await interaction.followup.send(
-                f"⚠️ **{title}** is {size_mb:.1f} MB — too large for Discord.\n"
-                f"Use yt-dlp locally:\n```yt-dlp -x --audio-format wav '{url}'```"
-            )
+            await interaction.followup.send(f"⚠️ **{title}** is {size_mb:.1f} MB — too large for Discord. Uploading to GoFile...")
+            try:
+                server_resp = requests.get("https://api.gofile.io/servers", timeout=10)
+                server_resp.raise_for_status()
+                server = server_resp.json()["data"]["servers"][0]["name"]
+                with open(fpath, "rb") as f:
+                    upload_resp = requests.post(
+                        f"https://{server}.gofile.io/contents/uploadfile",
+                        files={"file": (sanitize_filename(title) + ".wav", f, "audio/wav")},
+                        timeout=300,
+                    )
+                upload_resp.raise_for_status()
+                link = upload_resp.json()["data"]["downloadPage"]
+                await interaction.followup.send(f"✅ **{title}**\n📎 Download here:\n{link}")
+            except Exception as e:
+                await interaction.followup.send(f"❌ GoFile upload failed.\n```{e}```")
 
 
 # ---------------------------------------------------------------------------
