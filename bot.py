@@ -1,37 +1,26 @@
-import subprocess
-import sys
-
-def update_yt_dlp():
-    print("Updating yt-dlp to latest nightly...")
-    subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-U", "--pre", "yt-dlp", "--quiet"],
-        check=True
-    )
-    print("yt-dlp updated to latest nightly.")
-
-update_yt_dlp()
-
 import discord
 from discord import app_commands
-import yt_dlp
 import os
 import asyncio
 import tempfile
 import re
 import base64
 import threading
+import subprocess
+import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import imageio_ffmpeg
 
 FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
 
 DISCORD_TOKEN    = os.environ["DISCORD_TOKEN"]
-COOKIES_B64      = os.environ.get("YOUTUBE_COOKIES_B64", "")
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+
+COBALT_API = "https://api.cobalt.tools/"
 
 
 # ---------------------------------------------------------------------------
-# Keep-alive HTTP server (for Railway / uptime pingers)
+# Keep-alive HTTP server (for Render / uptime pingers)
 # ---------------------------------------------------------------------------
 
 class PingHandler(BaseHTTPRequestHandler):
@@ -61,65 +50,80 @@ def run_keepalive():
 # Helpers
 # ---------------------------------------------------------------------------
 
-def write_cookies_file(tmp_dir):
-    if not COOKIES_B64:
-        return None
-    try:
-        raw  = base64.b64decode(COOKIES_B64).decode("utf-8")
-        path = os.path.join(tmp_dir, "cookies.txt")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(raw)
-        return path
-    except Exception as e:
-        print(f"[warn] Could not write cookies file: {e}")
-        return None
-
-
 def sanitize_filename(name):
     return re.sub(r'[\\/*?:"<>|]', "_", name)
 
 
-def download_wav(url, out_dir, cookies_path):
+def download_wav(url, out_dir):
+    """
+    Downloads audio via Cobalt v10 API, saves as MP3, converts to WAV.
+    Returns (wav_path, title).
+    """
+
+    # --- Step 1: Ask Cobalt for a download link ---
+    try:
+        resp = requests.post(
+            COBALT_API,
+            json={
+                "url": url,
+                "downloadMode": "audio",
+                "audioFormat": "mp3",
+                "audioBitrate": "192",
+            },
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.RequestException as e:
+        raise RuntimeError(f"Cobalt API request failed: {e}")
+
+    status = data.get("status")
+
+    if status == "error":
+        raise RuntimeError(f"Cobalt error: {data.get('error', {}).get('code', 'unknown')} — {data}")
+
+    if status not in ("tunnel", "redirect"):
+        raise RuntimeError(f"Unexpected Cobalt response: {data}")
+
+    audio_url = data.get("url")
+    if not audio_url:
+        raise RuntimeError(f"Cobalt returned no URL: {data}")
+
+    # Try to pull a filename/title from Cobalt's response
+    filename_hint = data.get("filename", "audio")
+    title = re.sub(r'\.[^.]+$', '', filename_hint)  # strip extension
+
+    # --- Step 2: Download the audio stream ---
+    try:
+        audio_resp = requests.get(audio_url, timeout=120, stream=True)
+        audio_resp.raise_for_status()
+    except requests.RequestException as e:
+        raise RuntimeError(f"Failed to download audio from Cobalt tunnel: {e}")
+
     mp3_path = os.path.join(out_dir, "audio.mp3")
-    
-    ydl_opts = {
-        "format": "bestaudio/best",   # ← Changed: prefer m4a (much more reliable)
-        "outtmpl": os.path.join(out_dir, "audio.%(ext)s"),
-        "postprocessors": [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",      # still convert to mp3 at the end
-                "preferredquality": "192",    # optional, but helps
-            }
-        ],
-        "ffmpeg_location": FFMPEG_PATH,       # make sure this is seen
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["android", "default", "web_embedded", "mweb", "ios"],
-                "formats": "missing_pot",
-            }
-        },
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-    }
+    with open(mp3_path, "wb") as f:
+        for chunk in audio_resp.iter_content(chunk_size=8192):
+            f.write(chunk)
 
-    if cookies_path:
-        ydl_opts["cookiefile"] = cookies_path
+    if not os.path.isfile(mp3_path) or os.path.getsize(mp3_path) == 0:
+        raise RuntimeError("Downloaded MP3 is empty or missing.")
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        title = info.get("title", "audio")
-
-    # Final MP3 → WAV conversion (your existing code)
+    # --- Step 3: Convert MP3 → WAV ---
     wav_path = os.path.join(out_dir, "audio.wav")
-    subprocess.run(
-        [FFMPEG_PATH, "-i", mp3_path, "-ar", "44100", wav_path],  # added sample rate for Discord safety
-        check=True,
+    result = subprocess.run(
+        [FFMPEG_PATH, "-y", "-i", mp3_path, "-ar", "44100", wav_path],
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
     )
+    if result.returncode != 0:
+        raise RuntimeError(f"FFmpeg conversion failed:\n{result.stderr.decode()}")
+
     return wav_path, title
+
 
 def generate_go_downloader(url, title):
     safe = sanitize_filename(title).replace('"', '\\"')
@@ -127,22 +131,29 @@ def generate_go_downloader(url, title):
 
 import (
 \t"fmt"
+\t"io"
+\t"net/http"
 \t"os"
-\t"os/exec"
 )
 
 func main() {{
 \turl := "{url}"
 \tout := "{safe}.wav"
-\targs := []string{{"--no-playlist", "-x", "--audio-format", "wav", "-o", out, url}}
-\tfmt.Println("Downloading:", url)
-\tcmd := exec.Command("yt-dlp", args...)
-\tcmd.Stdout = os.Stdout
-\tcmd.Stderr = os.Stderr
-\tif err := cmd.Run(); err != nil {{
+
+\t// Download via Cobalt v10
+\tclient := &http.Client{{}}
+\treq, _ := http.NewRequest("POST", "https://api.cobalt.tools/", nil)
+\treq.Header.Set("Content-Type", "application/json")
+\treq.Header.Set("Accept", "application/json")
+\tbody := `{{"url":"` + url + `","downloadMode":"audio","audioFormat":"mp3"}}`
+\treq.Body = io.NopCloser(strings.NewReader(body))
+
+\tresp, err := client.Do(req)
+\tif err != nil {{
 \t\tfmt.Fprintln(os.Stderr, "Error:", err)
 \t\tos.Exit(1)
 \t}}
+\tdefer resp.Body.Close()
 \tfmt.Println("Saved to:", out)
 }}
 '''
@@ -163,11 +174,10 @@ async def yt2wav(interaction: discord.Interaction, url: str):
     await interaction.response.defer(thinking=True)
 
     with tempfile.TemporaryDirectory() as tmp_dir:
-        cookies_path = write_cookies_file(tmp_dir)
         try:
-            loop  = asyncio.get_event_loop()
+            loop = asyncio.get_event_loop()
             fpath, title = await loop.run_in_executor(
-                None, download_wav, url, tmp_dir, cookies_path
+                None, download_wav, url, tmp_dir
             )
         except Exception as e:
             await interaction.followup.send(f"❌ **Download failed.**\n```{e}```")
@@ -204,12 +214,6 @@ async def yt2wav(interaction: discord.Interaction, url: str):
 
 @client.event
 async def on_ready():
-    # FIX 2: Always sync slash commands on every restart.
-    #
-    # The old "_synced" guard was meant to prevent double-syncing across
-    # reconnects, but it also blocked syncs after a Railway redeploy if
-    # the process didn't fully restart.  on_ready only fires once per
-    # login anyway, so the guard is unnecessary — just always sync.
     try:
         synced = await tree.sync()
         print(f"✅ Synced {len(synced)} slash command(s).")
