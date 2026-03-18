@@ -83,7 +83,7 @@ def download_wav(url, out_dir, cookies_path):
     mp3_path = os.path.join(out_dir, "audio.mp3")
     
     ydl_opts = {
-        "format": "bestaudio[ext=m4a]/bestaudio/best",   # ← Changed: prefer m4a (much more reliable)
+        "format": "bestaudio/best",   # ← Changed: prefer m4a (much more reliable)
         "outtmpl": os.path.join(out_dir, "audio.%(ext)s"),
         "postprocessors": [
             {
