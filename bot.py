@@ -67,7 +67,7 @@ def download_wav(url, out_dir):
                 "url": url,
                 "downloadMode": "audio",
                 "audioFormat": "mp3",
-                "audioBitrate": "192",
+                "audioBitrate": "256",
             },
             headers={
                 "Accept": "application/json",
