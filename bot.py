@@ -75,6 +75,7 @@ def download_wav(url, out_dir):
             },
             timeout=30,
         )
+        print(f"Cobalt response: {resp.status_code} {resp.text}")
         resp.raise_for_status()
         data = resp.json()
     except requests.RequestException as e:
