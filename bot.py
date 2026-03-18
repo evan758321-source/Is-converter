@@ -16,8 +16,7 @@ FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
 DISCORD_TOKEN    = os.environ["DISCORD_TOKEN"]
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 
-COBALT_API = "https://api.cobalt.tools/"
-
+COBALT_API = os.environ.get("COBALT_API", "https://cobalt-production-cf4e.up.railway.app")
 
 # ---------------------------------------------------------------------------
 # Keep-alive HTTP server (for Render / uptime pingers)
