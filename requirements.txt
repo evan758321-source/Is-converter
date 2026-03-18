@@ -1,3 +1,4 @@
 discord.py
 requests
 imageio-ffmpeg
+yt-dlp
