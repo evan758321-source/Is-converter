@@ -101,6 +101,44 @@ async def send_wav_result(interaction, fpath, title):
             await interaction.followup.send(f"❌ GoFile upload failed.\n```{e}```")
 
 
+def download_with_ytdlp(url, out_dir, filename_prefix):
+    """
+    Generic yt-dlp downloader used by TikTok, SoundCloud, Instagram, and X.
+    Returns (wav_path, title).
+    """
+    import yt_dlp
+
+    raw_template = os.path.join(out_dir, filename_prefix)
+
+    ydl_opts = {
+        "format": "bestaudio/best",
+        "outtmpl": raw_template + ".%(ext)s",
+        "quiet": True,
+        "no_warnings": True,
+        "ffmpeg_location": FFMPEG_PATH,
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            )
+        },
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+
+    title = info.get("title") or info.get("uploader") or filename_prefix
+    ext   = info.get("ext", "mp4")
+    downloaded_path = f"{raw_template}.{ext}"
+
+    if not os.path.isfile(downloaded_path) or os.path.getsize(downloaded_path) == 0:
+        raise RuntimeError("yt-dlp downloaded an empty or missing file.")
+
+    wav_path = convert_to_wav(downloaded_path, out_dir)
+    return wav_path, title
+
+
 # ---------------------------------------------------------------------------
 # YouTube helpers
 # ---------------------------------------------------------------------------
@@ -179,52 +217,6 @@ def download_wav(url, out_dir):
 
 
 # ---------------------------------------------------------------------------
-# TikTok helpers  (uses yt-dlp Python library — add 'yt-dlp' to requirements.txt)
-# ---------------------------------------------------------------------------
-
-def download_tiktok_wav(url, out_dir):
-    """
-    Download TikTok audio using the yt-dlp Python library.
-    No external binary required — works on Railway out of the box.
-    Just add 'yt-dlp' to requirements.txt.
-    """
-    import yt_dlp
-
-    raw_template = os.path.join(out_dir, "tiktok_audio")
-
-    ydl_opts = {
-        "format": "bestaudio/best",
-        "outtmpl": raw_template + ".%(ext)s",
-        "quiet": True,
-        "no_warnings": True,
-        "ffmpeg_location": FFMPEG_PATH,
-        # Spoof a browser UA to avoid TikTok bot-detection
-        "http_headers": {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            )
-        },
-    }
-
-    # --- Step 1: Extract info + download ---
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-
-    title = info.get("title") or info.get("uploader") or "tiktok_audio"
-    ext   = info.get("ext", "mp4")
-    downloaded_path = f"{raw_template}.{ext}"
-
-    if not os.path.isfile(downloaded_path) or os.path.getsize(downloaded_path) == 0:
-        raise RuntimeError("yt-dlp downloaded an empty or missing file.")
-
-    # --- Step 2: Convert -> WAV ---
-    wav_path = convert_to_wav(downloaded_path, out_dir)
-    return wav_path, title
-
-
-# ---------------------------------------------------------------------------
 # Bot setup
 # ---------------------------------------------------------------------------
 
@@ -262,7 +254,73 @@ async def tt2wav(interaction: discord.Interaction, url: str):
         try:
             loop = asyncio.get_event_loop()
             fpath, title = await loop.run_in_executor(
-                None, download_tiktok_wav, url, tmp_dir
+                None, download_with_ytdlp, url, tmp_dir, "tiktok_audio"
+            )
+        except Exception as e:
+            await interaction.followup.send(f"❌ **Download failed.**\n```{e}```")
+            return
+
+        if not os.path.isfile(fpath):
+            await interaction.followup.send("❌ WAV file not found after conversion.")
+            return
+
+        await send_wav_result(interaction, fpath, title)
+
+
+@tree.command(name="sc2wav", description="Convert a SoundCloud track to a WAV file")
+@app_commands.describe(url="The SoundCloud URL to convert")
+async def sc2wav(interaction: discord.Interaction, url: str):
+    await interaction.response.defer(thinking=True)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        try:
+            loop = asyncio.get_event_loop()
+            fpath, title = await loop.run_in_executor(
+                None, download_with_ytdlp, url, tmp_dir, "sc_audio"
+            )
+        except Exception as e:
+            await interaction.followup.send(f"❌ **Download failed.**\n```{e}```")
+            return
+
+        if not os.path.isfile(fpath):
+            await interaction.followup.send("❌ WAV file not found after conversion.")
+            return
+
+        await send_wav_result(interaction, fpath, title)
+
+
+@tree.command(name="ig2wav", description="Convert an Instagram reel/video to a WAV file")
+@app_commands.describe(url="The Instagram URL to convert")
+async def ig2wav(interaction: discord.Interaction, url: str):
+    await interaction.response.defer(thinking=True)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        try:
+            loop = asyncio.get_event_loop()
+            fpath, title = await loop.run_in_executor(
+                None, download_with_ytdlp, url, tmp_dir, "ig_audio"
+            )
+        except Exception as e:
+            await interaction.followup.send(f"❌ **Download failed.**\n```{e}```")
+            return
+
+        if not os.path.isfile(fpath):
+            await interaction.followup.send("❌ WAV file not found after conversion.")
+            return
+
+        await send_wav_result(interaction, fpath, title)
+
+
+@tree.command(name="x2wav", description="Convert an X (Twitter) video to a WAV file")
+@app_commands.describe(url="The X/Twitter URL to convert")
+async def x2wav(interaction: discord.Interaction, url: str):
+    await interaction.response.defer(thinking=True)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        try:
+            loop = asyncio.get_event_loop()
+            fpath, title = await loop.run_in_executor(
+                None, download_with_ytdlp, url, tmp_dir, "x_audio"
             )
         except Exception as e:
             await interaction.followup.send(f"❌ **Download failed.**\n```{e}```")
