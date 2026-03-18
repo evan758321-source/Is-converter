@@ -88,11 +88,11 @@ def download_wav(url, out_dir, cookies_path):
         "ffmpeg_location": FFMPEG_PATH,
         "extractor_args": {
             "youtube": {
-                # ← THIS IS THE 2026 FIX
-                # default + android + the two clients that were just patched
-                # + missing_pot to stop SABR from killing everything on servers
-                "player_client": ["default", "android", "web_embedded", "mweb"],
+                # Strongest current combo for server environments (March 2026)
+                "player_client": ["android", "default", "web_embedded", "mweb", "ios"],
                 "formats": "missing_pot",
+                # Extra: skip clients that often force SABR on servers
+                "skip": ["web", "web_safari", "tv", "android_vr"]  # comment this line out if you want to test including them
             }
         },
         "quiet": True,
@@ -106,7 +106,7 @@ def download_wav(url, out_dir, cookies_path):
         info = ydl.extract_info(url, download=True)
         title = info.get("title", "audio")
 
-    # Convert MP3 → WAV (unchanged)
+    # MP3 → WAV conversion (unchanged)
     wav_path = os.path.join(out_dir, "audio.wav")
     subprocess.run(
         [FFMPEG_PATH, "-i", mp3_path, wav_path],
@@ -115,7 +115,6 @@ def download_wav(url, out_dir, cookies_path):
         stderr=subprocess.DEVNULL,
     )
     return wav_path, title
-
 
 def generate_go_downloader(url, title):
     safe = sanitize_filename(title).replace('"', '\\"')
