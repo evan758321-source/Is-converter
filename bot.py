@@ -83,19 +83,32 @@ def download_wav(url, out_dir, cookies_path):
     mp3_path = os.path.join(out_dir, "audio.mp3")
 
     ydl_opts = {
-    "format": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
-    "outtmpl": os.path.join(out_dir, "audio.%(ext)s"),
-    "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}],
-    "ffmpeg_location": FFMPEG_PATH,
-    "extractor_args": {
-        "youtube": {
-            "player_client": ["android", "web"],
-        }
-    },
-    "quiet": True,
-    "no_warnings": True,
-    "noplaylist": True,
-}
+        # ----------------------------------------------------------------
+        # FIX 1: YouTube SABR bypass
+        #
+        # YouTube now forces SABR streaming on "web", "ios", and
+        # "tv_embedded" clients — those clients return zero usable
+        # format URLs on server IPs.  The "android" and "mweb" clients
+        # still return direct HTTPS audio streams.
+        #
+        # "formats": "missing_pot" tells yt-dlp to include any format
+        # that is missing a PO token instead of silently dropping it,
+        # giving us the widest possible fallback net.
+        # ----------------------------------------------------------------
+        "format": "bestaudio/best",
+        "outtmpl": os.path.join(out_dir, "audio.%(ext)s"),
+        "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}],
+        "ffmpeg_location": FFMPEG_PATH,
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "mweb"],
+                "formats": "missing_pot",
+            }
+        },
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+    }
     if cookies_path:
         ydl_opts["cookiefile"] = cookies_path
 
@@ -198,13 +211,17 @@ async def yt2wav(interaction: discord.Interaction, url: str):
 
 @client.event
 async def on_ready():
-    if not getattr(client, "_synced", False):
-        try:
-            synced = await tree.sync()
-            print(f"✅ Synced {len(synced)} slash command(s).")
-        except discord.HTTPException as e:
-            print(f"[warn] Command sync failed: {e}")
-        client._synced = True
+    # FIX 2: Always sync slash commands on every restart.
+    #
+    # The old "_synced" guard was meant to prevent double-syncing across
+    # reconnects, but it also blocked syncs after a Railway redeploy if
+    # the process didn't fully restart.  on_ready only fires once per
+    # login anyway, so the guard is unnecessary — just always sync.
+    try:
+        synced = await tree.sync()
+        print(f"✅ Synced {len(synced)} slash command(s).")
+    except discord.HTTPException as e:
+        print(f"[warn] Command sync failed: {e}")
 
     print(f"✅ Logged in as {client.user}")
 
