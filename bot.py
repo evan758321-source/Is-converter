@@ -81,24 +81,29 @@ def sanitize_filename(name):
 
 def download_wav(url, out_dir, cookies_path):
     mp3_path = os.path.join(out_dir, "audio.mp3")
+    
     ydl_opts = {
-        "format": "bestaudio/best",
+        "format": "bestaudio[ext=m4a]/bestaudio/best",   # ← Changed: prefer m4a (much more reliable)
         "outtmpl": os.path.join(out_dir, "audio.%(ext)s"),
-        "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}],
-        "ffmpeg_location": FFMPEG_PATH,
+        "postprocessors": [
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",      # still convert to mp3 at the end
+                "preferredquality": "192",    # optional, but helps
+            }
+        ],
+        "ffmpeg_location": FFMPEG_PATH,       # make sure this is seen
         "extractor_args": {
             "youtube": {
-                # Strongest current combo for server environments (March 2026)
                 "player_client": ["android", "default", "web_embedded", "mweb", "ios"],
                 "formats": "missing_pot",
-                # Extra: skip clients that often force SABR on servers
-                "skip": ["web", "web_safari", "tv", "android_vr"]  # comment this line out if you want to test including them
             }
         },
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
     }
+
     if cookies_path:
         ydl_opts["cookiefile"] = cookies_path
 
@@ -106,10 +111,10 @@ def download_wav(url, out_dir, cookies_path):
         info = ydl.extract_info(url, download=True)
         title = info.get("title", "audio")
 
-    # MP3 → WAV conversion (unchanged)
+    # Final MP3 → WAV conversion (your existing code)
     wav_path = os.path.join(out_dir, "audio.wav")
     subprocess.run(
-        [FFMPEG_PATH, "-i", mp3_path, wav_path],
+        [FFMPEG_PATH, "-i", mp3_path, "-ar", "44100", wav_path],  # added sample rate for Discord safety
         check=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
