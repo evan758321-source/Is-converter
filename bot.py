@@ -14,7 +14,7 @@ FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
 
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
 RAPIDAPI_KEY  = os.environ["RAPIDAPI_KEY"]
-MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+MAX_UPLOAD_BYTES = 8 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
