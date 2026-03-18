@@ -2,12 +2,12 @@ import subprocess
 import sys
 
 def update_yt_dlp():
-    print("Updating yt-dlp...")
+    print("Updating yt-dlp to nightly...")
     subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-U", "yt-dlp", "--quiet"],
+        [sys.executable, "-m", "pip", "install", "-U", "--pre", "yt-dlp", "--quiet"],
         check=True
     )
-    print("yt-dlp updated.")
+    print("yt-dlp updated to latest nightly.")
 
 update_yt_dlp()
 
