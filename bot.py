@@ -4,17 +4,28 @@ import os
 import asyncio
 import tempfile
 import re
+import time
 import threading
 import subprocess
 import requests
+import logging
+from concurrent.futures import ThreadPoolExecutor
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import imageio_ffmpeg
 
-FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+log = logging.getLogger(__name__)
 
-DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
-RAPIDAPI_KEY  = os.environ["RAPIDAPI_KEY"]
+FFMPEG_PATH      = imageio_ffmpeg.get_ffmpeg_exe()
+DISCORD_TOKEN    = os.environ["DISCORD_TOKEN"]
+RAPIDAPI_KEY     = os.environ["RAPIDAPI_KEY"]
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024
+
+# Shared thread-pool — prevents exhausting the default executor over time
+_executor = ThreadPoolExecutor(max_workers=4)
 
 
 # ---------------------------------------------------------------------------
@@ -39,9 +50,12 @@ class PingHandler(BaseHTTPRequestHandler):
 
 def run_keepalive():
     port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), PingHandler)
-    print(f"Keep-alive HTTP server listening on port {port}")
-    server.serve_forever()
+    try:
+        server = HTTPServer(("0.0.0.0", port), PingHandler)
+        log.info("Keep-alive HTTP server listening on port %d", port)
+        server.serve_forever()
+    except Exception:
+        log.exception("Keep-alive server crashed — bot will continue without it")
 
 
 # ---------------------------------------------------------------------------
@@ -80,28 +94,33 @@ def upload_to_gofile(fpath, title):
     return upload_resp.json()["data"]["downloadPage"]
 
 
-async def send_wav_result(interaction, fpath, title):
+async def send_wav_result(interaction: discord.Interaction, fpath: str, title: str) -> None:
     """Send the WAV to Discord, falling back to GoFile if too large."""
-    size = os.path.getsize(fpath)
+    size    = os.path.getsize(fpath)
+    safe    = sanitize_filename(title)
+    size_mb = size / (1024 * 1024)
 
     if size <= MAX_UPLOAD_BYTES:
         await interaction.followup.send(
             f"✅ **{title}**",
-            file=discord.File(fpath, filename=sanitize_filename(title) + ".wav"),
+            file=discord.File(fpath, filename=safe + ".wav"),
         )
-    else:
-        size_mb = size / (1024 * 1024)
-        await interaction.followup.send(
-            f"⚠️ **{title}** is {size_mb:.1f} MB — too large for Discord. Uploading to GoFile..."
-        )
-        try:
-            link = upload_to_gofile(fpath, title)
-            await interaction.followup.send(f"✅ **{title}**\n📎 Download here:\n{link}")
-        except Exception as e:
-            await interaction.followup.send(f"❌ GoFile upload failed.\n```{e}```")
+        return
+
+    await interaction.followup.send(
+        f"📦 **{title}** is {size_mb:.1f} MB — too large for Discord. "
+        f"Uploading to GoFile, hang tight…"
+    )
+    try:
+        loop = asyncio.get_running_loop()
+        link = await loop.run_in_executor(_executor, upload_to_gofile, fpath, title)
+        await interaction.followup.send(f"✅ **{title}**\n📎 {link}")
+    except Exception as e:
+        log.exception("GoFile upload failed for %r", title)
+        await interaction.followup.send(f"❌ GoFile upload failed.\n```{e}```")
 
 
-def download_with_ytdlp(url, out_dir, filename_prefix):
+def download_with_ytdlp(url: str, out_dir: str, filename_prefix: str):
     """
     Generic yt-dlp downloader used by TikTok, SoundCloud, Instagram, and X.
     Returns (wav_path, title).
@@ -130,11 +149,19 @@ def download_with_ytdlp(url, out_dir, filename_prefix):
 
     title = info.get("title") or info.get("uploader") or filename_prefix
     ext   = info.get("ext", "mp4")
+
+    # yt-dlp may remux to a different extension; scan the directory as fallback
     downloaded_path = f"{raw_template}.{ext}"
-
     if not os.path.isfile(downloaded_path) or os.path.getsize(downloaded_path) == 0:
-        raise RuntimeError("yt-dlp downloaded an empty or missing file.")
+        candidates = [
+            os.path.join(out_dir, f) for f in os.listdir(out_dir)
+            if f.startswith(filename_prefix) and not f.endswith(".wav")
+        ]
+        if not candidates:
+            raise RuntimeError("yt-dlp downloaded an empty or missing file.")
+        downloaded_path = max(candidates, key=os.path.getsize)
 
+    log.info("Downloaded %r (%s)", title, downloaded_path)
     wav_path = convert_to_wav(downloaded_path, out_dir)
     return wav_path, title
 
@@ -157,61 +184,56 @@ def extract_video_id(url):
     raise ValueError(f"Could not extract video ID from URL: {url}")
 
 
-def download_wav(url, out_dir):
+def download_wav(url: str, out_dir: str):
+    """Download a YouTube video as WAV via RapidAPI. Returns (wav_path, title)."""
     video_id = extract_video_id(url)
 
-    # --- Step 1: Request MP3 conversion from RapidAPI ---
-    response = requests.get(
-        "https://youtube-mp36.p.rapidapi.com/dl",
-        headers={
-            "X-RapidAPI-Key": RAPIDAPI_KEY,
-            "X-RapidAPI-Host": "youtube-mp36.p.rapidapi.com",
-        },
-        params={"id": video_id},
-        timeout=60,
-    )
-    response.raise_for_status()
-    data = response.json()
+    rapidapi_headers = {
+        "X-RapidAPI-Key":  RAPIDAPI_KEY,
+        "X-RapidAPI-Host": "youtube-mp36.p.rapidapi.com",
+    }
+
+    def poll_conversion():
+        resp = requests.get(
+            "https://youtube-mp36.p.rapidapi.com/dl",
+            headers=rapidapi_headers,
+            params={"id": video_id},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    data = poll_conversion()
 
     if data.get("status") != "ok":
-        import time
-        for _ in range(5):
-            time.sleep(3)
-            response = requests.get(
-                "https://youtube-mp36.p.rapidapi.com/dl",
-                headers={
-                    "X-RapidAPI-Key": RAPIDAPI_KEY,
-                    "X-RapidAPI-Host": "youtube-mp36.p.rapidapi.com",
-                },
-                params={"id": video_id},
-                timeout=60,
-            )
-            response.raise_for_status()
-            data = response.json()
+        log.info("RapidAPI not ready yet, polling (video_id=%s)…", video_id)
+        for attempt in range(1, 6):
+            time.sleep(4)
+            data = poll_conversion()
             if data.get("status") == "ok":
+                log.info("RapidAPI ready after %d attempt(s)", attempt)
                 break
         else:
-            raise RuntimeError(f"RapidAPI conversion failed: {data}")
+            raise RuntimeError(f"RapidAPI conversion timed out: {data}")
 
     mp3_url = data.get("link")
     title   = data.get("title", "audio")
 
     if not mp3_url:
-        raise RuntimeError(f"No download link returned: {data}")
+        raise RuntimeError(f"No download link in RapidAPI response: {data}")
 
-    # --- Step 2: Download the MP3 ---
+    log.info("Downloading MP3 for %r…", title)
     audio_resp = requests.get(mp3_url, timeout=120, stream=True)
     audio_resp.raise_for_status()
 
     mp3_path = os.path.join(out_dir, "audio.mp3")
     with open(mp3_path, "wb") as f:
-        for chunk in audio_resp.iter_content(chunk_size=8192):
+        for chunk in audio_resp.iter_content(chunk_size=65536):
             f.write(chunk)
 
     if not os.path.isfile(mp3_path) or os.path.getsize(mp3_path) == 0:
         raise RuntimeError("Downloaded MP3 is empty or missing.")
 
-    # --- Step 3: Convert MP3 -> WAV ---
     wav_path = convert_to_wav(mp3_path, out_dir)
     return wav_path, title
 
@@ -225,127 +247,93 @@ client  = discord.Client(intents=intents)
 tree    = app_commands.CommandTree(client)
 
 
+# ---------------------------------------------------------------------------
+# Generic command handler
+# ---------------------------------------------------------------------------
+
+async def _handle_conversion(
+    interaction: discord.Interaction,
+    url: str,
+    worker,          # callable(url, out_dir) -> (wav_path, title)
+    label: str,      # human name shown on error, e.g. "YouTube"
+) -> None:
+    await interaction.response.defer(thinking=True)
+    loop = asyncio.get_running_loop()
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            fpath, title = await loop.run_in_executor(_executor, worker, url, tmp_dir)
+            if not os.path.isfile(fpath):
+                await interaction.followup.send("❌ WAV file not found after conversion.")
+                return
+            await send_wav_result(interaction, fpath, title)
+    except Exception as e:
+        log.exception("%s conversion failed for %r", label, url)
+        await interaction.followup.send(f"❌ **{label} conversion failed.**\n```{e}```")
+
+
+# ---------------------------------------------------------------------------
+# Slash commands
+# ---------------------------------------------------------------------------
+
 @tree.command(name="yt2wav", description="Convert a YouTube video to a WAV file")
 @app_commands.describe(url="The YouTube URL to convert")
 async def yt2wav(interaction: discord.Interaction, url: str):
-    await interaction.response.defer(thinking=True)
-
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        try:
-            loop = asyncio.get_event_loop()
-            fpath, title = await loop.run_in_executor(None, download_wav, url, tmp_dir)
-        except Exception as e:
-            await interaction.followup.send(f"❌ **Download failed.**\n```{e}```")
-            return
-
-        if not os.path.isfile(fpath):
-            await interaction.followup.send("❌ WAV file not found after conversion.")
-            return
-
-        await send_wav_result(interaction, fpath, title)
+    await _handle_conversion(
+        interaction, url,
+        lambda u, d: download_wav(u, d),
+        "YouTube",
+    )
 
 
 @tree.command(name="tt2wav", description="Convert a TikTok video to a WAV file")
 @app_commands.describe(url="The TikTok URL to convert")
 async def tt2wav(interaction: discord.Interaction, url: str):
-    await interaction.response.defer(thinking=True)
-
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        try:
-            loop = asyncio.get_event_loop()
-            fpath, title = await loop.run_in_executor(
-                None, download_with_ytdlp, url, tmp_dir, "tiktok_audio"
-            )
-        except Exception as e:
-            await interaction.followup.send(f"❌ **Download failed.**\n```{e}```")
-            return
-
-        if not os.path.isfile(fpath):
-            await interaction.followup.send("❌ WAV file not found after conversion.")
-            return
-
-        await send_wav_result(interaction, fpath, title)
+    await _handle_conversion(
+        interaction, url,
+        lambda u, d: download_with_ytdlp(u, d, "tiktok_audio"),
+        "TikTok",
+    )
 
 
 @tree.command(name="sc2wav", description="Convert a SoundCloud track to a WAV file")
 @app_commands.describe(url="The SoundCloud URL to convert")
 async def sc2wav(interaction: discord.Interaction, url: str):
-    await interaction.response.defer(thinking=True)
-
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        try:
-            loop = asyncio.get_event_loop()
-            fpath, title = await loop.run_in_executor(
-                None, download_with_ytdlp, url, tmp_dir, "sc_audio"
-            )
-        except Exception as e:
-            await interaction.followup.send(f"❌ **Download failed.**\n```{e}```")
-            return
-
-        if not os.path.isfile(fpath):
-            await interaction.followup.send("❌ WAV file not found after conversion.")
-            return
-
-        await send_wav_result(interaction, fpath, title)
+    await _handle_conversion(
+        interaction, url,
+        lambda u, d: download_with_ytdlp(u, d, "sc_audio"),
+        "SoundCloud",
+    )
 
 
 @tree.command(name="ig2wav", description="Convert an Instagram reel/video to a WAV file")
 @app_commands.describe(url="The Instagram URL to convert")
 async def ig2wav(interaction: discord.Interaction, url: str):
-    await interaction.response.defer(thinking=True)
-
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        try:
-            loop = asyncio.get_event_loop()
-            fpath, title = await loop.run_in_executor(
-                None, download_with_ytdlp, url, tmp_dir, "ig_audio"
-            )
-        except Exception as e:
-            await interaction.followup.send(f"❌ **Download failed.**\n```{e}```")
-            return
-
-        if not os.path.isfile(fpath):
-            await interaction.followup.send("❌ WAV file not found after conversion.")
-            return
-
-        await send_wav_result(interaction, fpath, title)
+    await _handle_conversion(
+        interaction, url,
+        lambda u, d: download_with_ytdlp(u, d, "ig_audio"),
+        "Instagram",
+    )
 
 
 @tree.command(name="x2wav", description="Convert an X (Twitter) video to a WAV file")
 @app_commands.describe(url="The X/Twitter URL to convert")
 async def x2wav(interaction: discord.Interaction, url: str):
-    await interaction.response.defer(thinking=True)
+    await _handle_conversion(
+        interaction, url,
+        lambda u, d: download_with_ytdlp(u, d, "x_audio"),
+        "X/Twitter",
+    )
 
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        try:
-            loop = asyncio.get_event_loop()
-            fpath, title = await loop.run_in_executor(
-                None, download_with_ytdlp, url, tmp_dir, "x_audio"
-            )
-        except Exception as e:
-            await interaction.followup.send(f"❌ **Download failed.**\n```{e}```")
-            return
-
-        if not os.path.isfile(fpath):
-            await interaction.followup.send("❌ WAV file not found after conversion.")
-            return
-
-        await send_wav_result(interaction, fpath, title)
-
-
-# ---------------------------------------------------------------------------
-# on_ready
-# ---------------------------------------------------------------------------
 
 @client.event
 async def on_ready():
     try:
         synced = await tree.sync()
-        print(f"✅ Synced {len(synced)} slash command(s).")
-    except discord.HTTPException as e:
-        print(f"[warn] Command sync failed: {e}")
-
-    print(f"✅ Logged in as {client.user}")
+        log.info("Synced %d slash command(s).", len(synced))
+    except discord.HTTPException:
+        log.exception("Command sync failed")
+    log.info("Logged in as %s (id=%s)", client.user, client.user.id)
 
 
 # ---------------------------------------------------------------------------
@@ -353,6 +341,7 @@ async def on_ready():
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    t = threading.Thread(target=run_keepalive, daemon=True)
-    t.start()
-    client.run(DISCORD_TOKEN)
+    threading.Thread(target=run_keepalive, daemon=True).start()
+    # reconnect=True (default) means discord.py will auto-reconnect on
+    # network drops — the main cause of ~2-day crashes on hosted bots.
+    client.run(DISCORD_TOKEN, reconnect=True, log_handler=None)
